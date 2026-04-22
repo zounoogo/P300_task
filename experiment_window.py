@@ -97,6 +97,17 @@ class ExperimentWindow:
         # Tkinter
         self._root:   Optional[tk.Tk]     = None
         self._canvas: Optional[tk.Canvas] = None
+        
+        # Dynamic sizing (will update on resize)
+        self._W = 1
+        self._H = 1
+        self._cx = 0
+        self._cy = 0
+        self._radius_ratio = 0.15  # radius as % of window height
+        
+        # Track current display state for resize handling
+        self._current_display = None  # tracks what's being displayed
+        self._current_lines = None    # stores lines for text screens
 
     # ── public ───────────────────────────────
 
@@ -108,12 +119,58 @@ class ExperimentWindow:
 
     # ── window setup ─────────────────────────
 
+    def _update_dimensions(self) -> None:
+        """Recalculate window dimensions and center position."""
+        self._root.update()
+        self._W = self._canvas.winfo_width()
+        self._H = self._canvas.winfo_height()
+        self._cx = self._W // 2
+        self._cy = self._H // 2
+
+    def _on_canvas_resize(self, event=None) -> None:
+        """Handle canvas resize event — update dimensions and redraw current content."""
+        self._update_dimensions()
+        
+        # If displaying text, redraw it at new size
+        if self._current_display == "text" and self._current_lines:
+            self._draw_text_screen(self._current_lines)
+        # If displaying stimulus, redraw fixation cross at new center
+        elif self._current_display == "stimulus":
+            if self._canvas.find_withtag("fixation"):
+                self._canvas.delete("fixation")
+            self._draw_persistent_fixation()
+
+    def _on_close(self) -> None:
+        """Handle close button (X) — gracefully abort experiment."""
+        self._aborted = True
+        self.results = {"aborted": True}
+        try:
+            self._root.destroy()
+        except:
+            pass
+
     def _build_window(self) -> None:
         self._root = tk.Tk()
         self._root.title("P300 Experiment")
         self._root.configure(bg=BG_COLOR)
-        self._root.attributes("-fullscreen", True)
-        self._root.protocol("WM_DELETE_WINDOW", lambda: None)  # disable close btn
+        
+        # Maximize window but keep taskbar visible (not fullscreen)
+        # Use geometry to maximize on Linux/Mac
+        self._root.update_idletasks()
+        screen_width = self._root.winfo_screenwidth()
+        screen_height = self._root.winfo_screenheight()
+        
+        # Set window to ~95% of screen (leave room for taskbar)
+        geom_width = int(screen_width * 0.95)
+        geom_height = int(screen_height * 0.90)
+        geom_x = int((screen_width - geom_width) / 2)
+        geom_y = int((screen_height - geom_height) / 2)
+        
+        self._root.geometry(f"{geom_width}x{geom_height}+{geom_x}+{geom_y}")
+        
+        self._root.attributes("-topmost", False)  # don't force on top
+        self._root.lower()                        # start behind other windows
+        self._root.protocol("WM_DELETE_WINDOW", self._on_close)  # handle close button
 
         self._canvas = tk.Canvas(
             self._root,
@@ -127,12 +184,11 @@ class ExperimentWindow:
         self._root.bind("<Escape>", self._on_escape)
         self._root.bind("<r>",      self._on_r_key)
         self._root.bind("<R>",      self._on_r_key)
+        
+        # Bind resize event to update dimensions
+        self._canvas.bind("<Configure>", self._on_canvas_resize)
 
-        self._root.update()
-        self._W = self._root.winfo_width()
-        self._H = self._root.winfo_height()
-        self._cx = self._W // 2
-        self._cy = self._H // 2
+        self._update_dimensions()
 
     # ── phase controller ─────────────────────
 
@@ -252,6 +308,14 @@ class ExperimentWindow:
         Run all trials in *trials*.
         Returns block statistics dict.
         """
+        # Clear any leftover instruction text
+        self._canvas.delete("all")
+        self._canvas.configure(bg=BG_COLOR)
+        
+        # Draw fixation cross at the start of the block
+        self._current_display = "stimulus"  # set display state
+        self._draw_persistent_fixation()
+        
         n_hits = 0
         n_misses = 0
 
@@ -315,47 +379,67 @@ class ExperimentWindow:
 
     # ── stimulus display ─────────────────────
 
-    def _show_fixation(self) -> None:
-        """Draw white fixation cross on black background."""
+    def _draw_persistent_fixation(self) -> None:
+        """Draw fixation cross once at startup — it stays visible throughout experiment."""
         c = self._canvas
-        c.delete("all")
-        c.configure(bg=BG_COLOR)
+        self._update_dimensions()  # update in case window was resized
         cx, cy = self._cx, self._cy
-        s = FIX_SIZE
+        
+        # Scale fixation cross size with window (% of height)
+        s = max(20, int(self._H * 0.05))  # 5% of height, minimum 20px
+        
+        # Tag these with "fixation" so they are never deleted
         c.create_line(cx - s, cy, cx + s, cy,
-                      fill=FIX_COLOR, width=LINE_WIDTH)
+                      fill=FIX_COLOR, width=LINE_WIDTH, tags="fixation")
         c.create_line(cx, cy - s, cx, cy + s,
-                      fill=FIX_COLOR, width=LINE_WIDTH)
+                      fill=FIX_COLOR, width=LINE_WIDTH, tags="fixation")
+        c.update()
+
+    def _show_fixation(self) -> None:
+        """Fixation phase: cross is already on screen, just clear stimulus elements."""
+        c = self._canvas
+        self._update_dimensions()  # update in case window was resized
+        c.delete("stimulus")  # Remove only the stimulus circle, not the fixation cross
+        c.configure(bg=BG_COLOR)
         c.update()
 
     def _show_stimulus(self, trial: Trial) -> float:
         """
-        Draw stimulus circle, send LSL marker.
+        Draw stimulus: blue square (standard) or red ogive (target).
+        Fixation cross stays visible ON TOP.
         Returns perf_counter() at onset, 0.0 on error.
         """
         c = self._canvas
-        c.delete("all")
+        c.delete("stimulus")  # Remove only previous stimulus elements
         c.configure(bg=BG_COLOR)
+        
+        self._update_dimensions()  # update in case window was resized
         cx, cy = self._cx, self._cy
-        r = CIRCLE_RADIUS
+        
+        # Scale radius with window (% of height)
+        r = max(50, int(self._H * self._radius_ratio))
 
-        # Gray backing circle
-        c.create_oval(
-            cx - r - 10, cy - r - 10, cx + r + 10, cy + r + 10,
-            fill=CIRCLE_BG_COLOR, outline="",
-        )
+        if trial.stimulus_type == TARGET:
+            # Draw red ogive (pointed shape) for target
+            # Ogive is a pointed oval - create with polygon
+            points = [
+                cx, cy - r - 20,      # top point
+                cx + r, cy - r // 2,  # right upper
+                cx + r, cy + r // 2,  # right lower
+                cx, cy + r + 20,      # bottom point
+                cx - r, cy + r // 2,  # left lower
+                cx - r, cy - r // 2,  # left upper
+            ]
+            c.create_polygon(points, fill=TARGET_COLOR, outline="", tags="stimulus")
+        else:
+            # Draw blue square for standard
+            c.create_rectangle(
+                cx - r, cy - r, cx + r, cy + r,
+                fill=STANDARD_COLOR, outline="", tags="stimulus"
+            )
 
-        # Blue or red stimulus circle
-        color = TARGET_COLOR if trial.stimulus_type == TARGET else STANDARD_COLOR
-        c.create_oval(cx - r, cy - r, cx + r, cy + r,
-                      fill=color, outline="")
-
-        # Fixation cross stays visible on top of stimulus
-        s = FIX_SIZE
-        c.create_line(cx - s, cy, cx + s, cy,
-                      fill=FIX_COLOR, width=LINE_WIDTH)
-        c.create_line(cx, cy - s, cx, cy + s,
-                      fill=FIX_COLOR, width=LINE_WIDTH)
+        # Bring fixation cross to front (on top of stimulus shapes)
+        c.tag_raise("fixation")
 
         c.update()   # force immediate render
 
@@ -375,9 +459,11 @@ class ExperimentWindow:
         return onset_perf
 
     def _show_blank(self) -> None:
-        """Clear canvas to black (inter-trial interval display)."""
-        self._canvas.delete("all")
+        """Clear stimulus circle for inter-trial interval — fixation cross remains."""
+        self._update_dimensions()  # update in case window was resized
+        self._canvas.delete("stimulus")
         self._canvas.configure(bg=BG_COLOR)
+        self._canvas.update()
         self._canvas.update()
 
     # ── response collection ──────────────────
@@ -409,11 +495,12 @@ class ExperimentWindow:
         if not self._response_flag:
             self._response_flag = True
             self._response_time = time.perf_counter()
-            # Send LSL response marker
-            t = self._lsl.send_response()
-            self._logger.log_event(make_event_record(
-                MARKER_RESPONSE, None, None, t, get_timestamp_str(),
-            ))
+            # Send LSL response marker only if record_responses is enabled
+            if self._config.get("record_responses", True):
+                t = self._lsl.send_response()
+                self._logger.log_event(make_event_record(
+                    MARKER_RESPONSE, None, None, t, get_timestamp_str(),
+                ))
 
     def _on_escape(self, event=None) -> None:
         confirmed = messagebox.askyesno(
@@ -434,6 +521,7 @@ class ExperimentWindow:
 
     def _show_instructions(self, phase: str) -> None:
         """Block until spacebar pressed or Escape aborts."""
+        self._update_dimensions()  # update in case window was resized
         c = self._canvas
         c.delete("all")
         c.configure(bg=BG_COLOR)
@@ -554,22 +642,42 @@ class ExperimentWindow:
         c.delete("all")
         c.configure(bg=BG_COLOR)
 
-        y = self._cy - (len(lines) * 22) // 2
+        # Store current display state for resize handling
+        self._current_display = "text"
+        self._current_lines = lines
+        
+        self._update_dimensions()  # update in case window was resized
+        
+        # Scale fonts dynamically with window size
+        # Use both width and height to determine scaling
+        scale_factor = min(self._W, self._H) / 1000.0  # normalize to ~1000px
+        
+        base_font_size = max(12, int(14 * scale_factor))           # body text
+        title_font_size = max(16, int(26 * scale_factor))          # heading
+        small_font_size = max(10, int(12 * scale_factor))          # small text
+        line_spacing = max(25, int(40 * scale_factor))             # space between lines
+
+        y = self._cy - (len(lines) * line_spacing) // 2
         for i, line in enumerate(lines):
             if i == 0:
-                font = ("Courier New", 22, "bold")
+                # First line: larger, bold, red
+                font = ("Courier New", title_font_size, "bold")
                 color = "#e94560"
             elif line.startswith("●"):
-                font = ("Courier New", 14)
+                # Bullet points: blue/red accents
+                font = ("Courier New", base_font_size)
                 color = "#4fc3f7" if "Blue" in line else "#ef9a9a"
             elif line.startswith("  ✓"):
-                font = ("Courier New", 13)
+                # Checkmarks: green
+                font = ("Courier New", small_font_size)
                 color = "#81c784"
             elif line.startswith("Press"):
-                font = ("Courier New", 14, "bold")
+                # Instructions: bold yellow
+                font = ("Courier New", base_font_size, "bold")
                 color = "#fff176"
             else:
-                font = ("Courier New", 14)
+                # Normal text: white
+                font = ("Courier New", base_font_size)
                 color = TEXT_COLOR
 
             c.create_text(
@@ -577,7 +685,7 @@ class ExperimentWindow:
                 text=line, font=font, fill=color,
                 anchor="center",
             )
-            y += 36
+            y += line_spacing
 
         c.update()
 

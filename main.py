@@ -10,7 +10,7 @@ Flow
   3. Generate trials         → trial_generator
   4. Open SessionLogger      → session_logger
   5. Open LSL outlet         → lsl_markers
-  6. Run ExperimentWindow    → experiment_window
+  6. Run ExperimentWindow    → experiment_window (in background thread)
   7. Close logger            → write metadata.json
   8. Print session summary   → console
 
@@ -20,6 +20,7 @@ Run
 """
 
 import sys
+import threading
 import traceback
 
 from utils            import build_session_dir, get_timestamp_str
@@ -95,7 +96,7 @@ def main() -> None:
         print("[main] WARNING: LSL not available. "
               "Experiment will run without EEG markers.")
 
-    # ── 6. Experiment window ──────────────────
+    # ── 6. Experiment window (background thread) ──
     print("\n[main] Launching experiment window...")
 
     try:
@@ -106,7 +107,10 @@ def main() -> None:
             logger          = logger,
             lsl             = lsl,
         )
-        exp.run()
+        # Run experiment in a separate thread so terminal stays free
+        thread = threading.Thread(target=exp.run, daemon=False)
+        thread.start()
+        thread.join()  # wait for experiment to finish
         results = exp.results
 
     except Exception as exc:

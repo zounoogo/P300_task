@@ -88,6 +88,7 @@ class ConfigWindow:
         self.result: Optional[Dict[str, Any]] = None
         self._entries: Dict[str, tk.StringVar] = {}
         self._root: Optional[tk.Tk] = None
+        self._record_response_var: Optional[tk.BooleanVar] = None
 
     # ── public API ───────────────────────────
 
@@ -199,6 +200,17 @@ class ConfigWindow:
         )
         self._lsl_label.pack(anchor="w", pady=(12, 0))
         self._root.after(300, self._check_lsl)
+
+        # ── record responses option ───────────
+        self._record_response_var = tk.BooleanVar(value=True)
+        response_check = tk.Checkbutton(
+            content, text="Record participant responses (spacebar)",
+            variable=self._record_response_var,
+            font=self.FONT_SUB, bg=self.BG, fg=self.TEXT,
+            selectcolor=self.ENTRY_BG, activebackground=self.BG,
+            relief="flat",
+        )
+        response_check.pack(anchor="w", pady=(8, 0))
 
         # ── buttons ───────────────────────────
         btn_frame = tk.Frame(content, bg=self.BG)
@@ -332,6 +344,7 @@ class ConfigWindow:
 
         parsed["participant_id"] = pid
         parsed["operator_name"]  = op
+        parsed["record_responses"] = self._record_response_var.get()
         return parsed
 
     # ── button callbacks ─────────────────────
